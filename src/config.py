@@ -55,6 +55,22 @@ ALWAYS_SEND_TEST_ALERT = False
 # Heartbeat: send a (short) FB Messenger message even on no-signal days so you
 # know the scanner is alive. Set to False for silent no-signal runs.
 SEND_HEARTBEAT = True
+
+# Auto-open charts on signal days:
+#   AUTO_OPEN_CHARTS        - if True, open the generated PNGs in Preview even
+#                            when the scanner runs via launchd (no terminal).
+#   AUTO_OPEN_CHARTS_MAX_N  - cap so a busy day doesn't open 30 windows.
+#   AUTO_OPEN_ONLY_SIGNALS  - if True, only open charts that have an actionable
+#                            signal today (LIVE/FORMING/ENTRY/EXIT), skip the
+#                            most-recent-historical context charts.
+#   AUTOMATED_OPEN_DELAY_SEC - seconds to wait after open before the script exits,
+#                            so the OS has time to spawn Preview. 0 = no wait.
+# On a quiet day with no actionable signals, nothing opens even if heartbeat
+# is on -- opening 9 stale HIST charts would just be noise.
+AUTO_OPEN_CHARTS = True
+AUTO_OPEN_CHARTS_MAX_N = 6
+AUTO_OPEN_ONLY_SIGNALS = True
+AUTOMATED_OPEN_DELAY_SEC = 1.0
 # ------------------------------------------------------------------ #
 # Logging
 # ------------------------------------------------------------------ #

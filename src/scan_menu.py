@@ -17,6 +17,7 @@ import argparse
 import logging
 import os
 import sys
+import time
 import webbrowser
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -44,6 +45,57 @@ def _setup_logging():
             logging.StreamHandler(sys.stdout),
         ],
     )
+
+
+def _open_charts(charts, log, force_open=False, only_signals=False, ticker_tags=None):
+    """
+    Open generated chart PNGs in the OS default viewer (Preview on macOS).
+
+    Behavior:
+      - force_open=True  -> always open (the --open-charts CLI flag was passed).
+      - only_signals=True-> open ONLY charts whose ticker is in `ticker_tags`
+                           (i.e. actionable signals today). Skip the
+                           most-recent-historical context charts on quiet days.
+      - Cap at config.AUTO_OPEN_CHARTS_MAX_N windows to avoid a chart storm.
+
+    When opening via the GUI (no terminal attached, e.g. through launchd),
+    we sleep config.AUTOMATED_OPEN_DELAY_SEC afterward to give the OS time to
+    spawn the viewer process before our process exits.
+
+    `ticker_tags` optional: {ticker: tag} where tag is "LIVE"/"FORMING"/"ENTRY"/
+    "EXIT"/"HIST" -- used to filter when only_signals=True.
+    """
+    if not charts:
+        return
+
+    if only_signals and ticker_tags:
+        charts = [p for p in charts
+                  if any(t in ticker_tags and ticker_tags[t] not in ("HIST",)
+                          for t, _ in [(p.stem.split("_")[0], None)])]
+        # Fallback if the stem-based heuristic is unreliable: keep charts
+        # whose ticker is found in ticker_tags with an actionable tag.
+        keep = []
+        for p in charts:
+            stem_ticker = p.stem.split("_")[0]
+            tag = ticker_tags.get(stem_ticker)
+            if tag and tag not in ("HIST",):
+                keep.append(p)
+        charts = keep or charts  # don't end up with zero on mis-named files
+
+    charts = charts[: config.AUTO_OPEN_CHARTS_MAX_N]
+    if not charts:
+        log.info("No signal charts to open (only historical context).")
+        return
+    log.info("Opening %d chart(s) in viewer: %s",
+             len(charts), ", ".join(p.name for p in charts))
+    for p in charts:
+        try:
+            webbrowser.open(f"file://{p}")
+        except Exception as e:
+            log.warning("Failed opening %s: %s", p, e)
+    # Give the OS a moment to spawn Preview before we exit (matters on launchd)
+    if config.AUTOMATED_OPEN_DELAY_SEC > 0:
+        time.sleep(float(config.AUTOMATED_OPEN_DELAY_SEC))
 
 
 def fetch_watchlist(force_refresh: bool = True, end_date: str = None) -> dict:
@@ -188,7 +240,9 @@ def main():
     ap.add_argument("--no-refresh", action="store_true",
                     help="Use cached CSVs (faster, may be stale)")
     ap.add_argument("--open-charts", action="store_true",
-                    help="Open any generated charts in Preview after run")
+                    help="Force-open ALL generated charts in Preview (overrides auto-open settings)")
+    ap.add_argument("--no-open-charts", action="store_true",
+                    help="Don't auto-open any charts this run (overrides config.AUTO_OPEN_CHARTS)")
     args = ap.parse_args()
 
     log.info("=" * 70)
@@ -237,21 +291,30 @@ def main():
     parts = []
     any_signals = False
     all_charts = []
+    ticker_tags = {}   # ticker -> most-actionable tag today (for auto-open filter)
     for name, r in results:
+        live_tag = None
         # VCP returns live/forming/hist signals plus live exits; Donchian returns signals
         if name == "VCP":
-            # Treat LIVE entries, FORMING watch-list, and EXIT alerts as actionable.
-            sigs = (r.get("live_signals")
-                    or r.get("forming_signals")
-                    or r.get("exits")
-                    or r.get("hist_signals") or {})
-            # Exits and new LIVE entries count as actionable even if hist is the only dict.
-            if r.get("exits") or r.get("live_signals") or r.get("forming_signals"):
-                any_signals = True
+            for ticker in (r.get("live_signals") or {}):
+                ticker_tags[ticker] = "LIVE"; any_signals = True
+            for ticker in (r.get("forming_signals") or {}):
+                if ticker not in ticker_tags or ticker_tags[ticker] == "HIST":
+                    ticker_tags[ticker] = "FORMING"; any_signals = True
+            for ticker in (r.get("exits") or {}):
+                ticker_tags[ticker] = "EXIT"; any_signals = True  # exit wins over hist/live
+            for ticker, info in (r.get("hist_signals") or {}).items():
+                if ticker not in ticker_tags:
+                    ticker_tags[ticker] = "HIST"
         else:
-            sigs = r.get("signals") or {}
-        if sigs:
-            any_signals = True
+            for ticker, sigs in (r.get("signals") or {}).items():
+                if sigs:
+                    # Donchian charts are per-ENTRY/EXIT today
+                    has_entry = any(s.type == "ENTRY" for s in sigs)
+                    has_exit = any(s.type == "EXIT" for s in sigs)
+                    t = "EXIT" if has_exit and not has_entry else "ENTRY"
+                    ticker_tags[ticker] = t
+                    any_signals = True
         parts.append(r["summary"])
         all_charts.extend(r["charts"])
 
@@ -262,11 +325,22 @@ def main():
         chart_lines = "\n📉 Charts saved for:\n" + "\n".join(f"  {p.name}" for p in all_charts)
         combined += chart_lines
 
+    # Decide whether to auto-open charts.
+    #   - Explicit --open-charts on the CLI always opens.
+    #   - Otherwise, on signal days (any_signals=True) and config.AUTO_OPEN_CHARTS
+    #     is on, open the signal charts (only, skipping the HIST context).
+    open_now_force = args.open_charts and all_charts and not args.no_open_charts
+    open_now_auto = (config.AUTO_OPEN_CHARTS and any_signals and all_charts
+                     and not args.no_open_charts)
+
     if args.dry_run:
         log.info("Dry-run: not sending alerts.")
-        if args.open_charts and all_charts:
-            for p in all_charts:
-                webbrowser.open(f"file://{p}")
+        if open_now_force:
+            _open_charts(all_charts, log, force_open=True, only_signals=False)
+        elif open_now_auto:
+            _open_charts(all_charts, log, force_open=False,
+                         only_signals=config.AUTO_OPEN_ONLY_SIGNALS,
+                         ticker_tags=ticker_tags)
         return
 
     # Decide whether to send heartbeat / alert
@@ -292,9 +366,13 @@ def main():
         log.error("Alert failed: %s", e)
         sys.exit(1)
 
-    if args.open_charts and all_charts:
-        for p in all_charts:
-            webbrowser.open(f"file://{p}")
+    # Open charts after sending the alert (auto when config.AUTO_OPEN_CHARTS is on).
+    if args.open_charts and all_charts and not args.no_open_charts:
+        _open_charts(all_charts, log, force_open=True, only_signals=False)
+    elif config.AUTO_OPEN_CHARTS and all_charts and not args.no_open_charts:
+        _open_charts(all_charts, log, force_open=False,
+                     only_signals=config.AUTO_OPEN_ONLY_SIGNALS,
+                     ticker_tags=ticker_tags)
 
 
 if __name__ == "__main__":

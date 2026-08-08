@@ -156,10 +156,31 @@ python3 src/scan_menu.py 4     # 20-MA Trend strength (STRONG-ABOVE / BLOCKED-BY
 python3 src/scan_menu.py 5     # All three strategies in one run
 
 # Common flags (combine with any strategy above):
-python3 src/scan_menu.py --dry-run 1         # scan + print + draw charts, NO FB alert
-python3 src/scan_menu.py --no-refresh 1      # use cached CSVs (faster, may be stale)
-python3 src/scan_menu.py --open-charts 1     # open the generated PNGs in Preview after run
-python3 src/scan_menu.py --test-alert        # send a single test FB Messenger message
+python3 src/scan_menu.py --dry-run 1          # scan + print + draw charts, NO FB alert
+python3 src/scan_menu.py --no-refresh 1       # use cached CSVs (faster, may be stale)
+python3 src/scan_menu.py --open-charts 1      # force-open ALL generated PNGs in Preview
+python3 src/scan_menu.py --no-open-charts 1    # auto-open OFF for this run
+python3 src/scan_menu.py --test-alert         # send a single test FB Messenger message
+```
+
+### Auto-open behavior
+
+On any run where actionable signals fire (VCP LIVE / FORMING / EXIT, Donchian
+ENTRY / EXIT, or 20-MA STRONG-ABOVE / BLOCKED-BY-MA), the scanner
+**automatically opens the annotated PNGs in Preview** — even when run via the
+launchd scheduler with no terminal attached. This is controlled in
+`src/config.py`:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `AUTO_OPEN_CHARTS` | `True` | Auto-open charts on signal days |
+| `AUTO_OPEN_CHARTS_MAX_N` | `6` | Cap so a busy day doesn't open 30 windows |
+| `AUTO_OPEN_ONLY_SIGNALS` | `True` | Skip historical-context charts; only open today's signal charts |
+| `AUTOMATED_OPEN_DELAY_SEC` | `1.0` | Pause before exit so the OS spawns Preview (matters under launchd) |
+
+On a quiet day with no actionable signals, nothing opens. Historical-context
+charts (the "most recent VCP setup per ticker" view) are always saved to
+`results/charts/` but are only opened if you pass `--open-charts` explicitly.
 ```
 
 The legacy Donchian-only entry point is still available (used by the
